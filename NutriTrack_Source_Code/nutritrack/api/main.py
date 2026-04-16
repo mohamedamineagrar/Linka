@@ -9,7 +9,6 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from nutritrack.graph import run_simulation
 from nutritrack.main import _build_dashboard_data
 from nutritrack.models.schemas import GPSLocation, HealthScore, NutriTrackState, ProductInfo, TelemetryData, QRTraceability
 from nutritrack.utils.llm_grok import get_grok_client
@@ -18,30 +17,6 @@ from nutritrack.utils.simulation import ScenarioType, _compute_health
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_DASHBOARD_PATH = PROJECT_ROOT / "nutritrack" / "data" / "dashboard_data.json"
-
-DEFAULT_SCENARIOS: list[tuple[str, str, float, str | None]] = [
-    (
-        "dairy_yogurt",
-        ScenarioType.TEMP_SPIKE,
-        4.0,
-        "The yogurt batch temperature is rising. What should I do?",
-    ),
-    (
-        "seafood_shrimp",
-        ScenarioType.SEVERE_DEGRADATION,
-        6.0,
-        "Shrimp quality is degrading fast. Emergency options?",
-    ),
-    (
-        "pharma_vaccines",
-        ScenarioType.MULTI_ANOMALY,
-        2.0,
-        "Vaccine transport showing multiple issues. Assess risk.",
-    ),
-    ("meat_beef", ScenarioType.HUMIDITY_DROP, 3.0, None),
-    ("fruits_citrus", ScenarioType.NORMAL, 8.0, None),
-]
-
 
 class AnalysisRequest(BaseModel):
     """Request body for a single on-demand simulation."""
@@ -100,17 +75,8 @@ def _generate_dashboard(refresh: bool = False) -> dict:
         if cached is not None:
             return cached
 
-    results: list[dict] = []
-    for product_key, scenario, hours_elapsed, user_query in DEFAULT_SCENARIOS:
-        state, log = run_simulation(product_key, scenario, hours_elapsed, user_query)
-        results.append({
-            "product": product_key,
-            "scenario": scenario,
-            "state": state,
-            "log": log,
-        })
-
-    dashboard_data = _build_dashboard_data(results)
+    # Static demo fixtures are disabled; keep dashboard driven by real/cached runs.
+    dashboard_data = _build_dashboard_data([])
     _write_dashboard_exports(dashboard_data)
     return dashboard_data
 
@@ -151,35 +117,24 @@ def _build_real_state(payload: AnalysisRequest) -> NutriTrackState:
 
 
 def _run_agent_reasoning(payload: AnalysisRequest) -> dict:
-    """Execute the full agent graph on real or simulated input and format the result."""
-    if payload.product is not None or payload.telemetry is not None or payload.gps is not None:
-        from nutritrack.graph import build_nutritrack_graph
+    """Execute the full agent graph on real input and format the result."""
+    if payload.product is None and payload.telemetry is None and payload.gps is None:
+        raise ValueError(
+            "Real input required: provide product, telemetry, or gps data. "
+            "Static simulation scenarios are disabled."
+        )
 
-        state = _build_real_state(payload)
-        graph = build_nutritrack_graph()
-        final_state = graph.invoke(state)
-        return _build_dashboard_data([
-            {
-                "product": payload.analysis_label or "real_input",
-                "scenario": payload.analysis_label or "real_world_input",
-                "state": final_state,
-                "log": graph.get_execution_log(),
-            }
-        ])
+    from nutritrack.graph import build_nutritrack_graph
 
-    state, log = run_simulation(
-        payload.product_key,
-        payload.scenario,
-        payload.hours_elapsed,
-        payload.user_query,
-    )
-
+    state = _build_real_state(payload)
+    graph = build_nutritrack_graph()
+    final_state = graph.invoke(state)
     return _build_dashboard_data([
         {
-            "product": payload.product_key,
-            "scenario": payload.scenario,
-            "state": state,
-            "log": log,
+            "product": payload.analysis_label or "real_input",
+            "scenario": payload.analysis_label or "real_world_input",
+            "state": final_state,
+            "log": graph.get_execution_log(),
         }
     ])
 
@@ -195,16 +150,10 @@ def _assistant_answer(payload: AssistantRequest) -> dict:
 
     llm = get_grok_client()
     if not llm.enabled:
-        recommendation = selected.get("recommendation", {})
         return {
-            "answer": (
-                recommendation.get("summary")
-                or "Assistant unavailable: Groq API key is not configured."
-            ),
-            "key_points": [
-                recommendation.get("explanation", "No additional explanation available."),
-            ],
-            "next_actions": [selected.get("decision", {}).get("action", "no_action")],
+            "answer": "Assistant unavailable: Groq API key is not configured.",
+            "key_points": [],
+            "next_actions": [],
             "llm_available": False,
         }
 
@@ -236,11 +185,10 @@ def _assistant_answer(payload: AssistantRequest) -> dict:
 
     result = llm.complete_json(system_prompt, user_prompt, max_tokens=700)
     if not result:
-        recommendation = selected.get("recommendation", {})
         return {
-            "answer": recommendation.get("summary", "Groq assistant did not return a response."),
-            "key_points": [recommendation.get("explanation", "No explanation available.")],
-            "next_actions": [selected.get("decision", {}).get("action", "no_action")],
+            "answer": "Groq assistant did not return a response.",
+            "key_points": [],
+            "next_actions": [],
             "llm_available": False,
         }
 

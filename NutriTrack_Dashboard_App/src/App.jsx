@@ -273,7 +273,7 @@ function EconomicsChart({ economics }) {
 }
 
 function AnomalyList({ anomalies }) {
-  if (!anomalies.length) return <div style={{ color: "var(--text-dim)", fontSize: 13, padding: 12, textAlign: "center" }}>✅ No anomalies detected</div>;
+  if (!anomalies.length) return <div style={{ color: "var(--text-dim)", fontSize: 13, padding: 12, textAlign: "center" }}>No anomaly items returned by the model for this shipment.</div>;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       {anomalies.map((a, i) => (
@@ -285,7 +285,7 @@ function AnomalyList({ anomalies }) {
         }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", textTransform: "capitalize" }}>
-              {a.type === "severe_degradation" ? "⚡ Compound Failure" : a.type === "temperature" ? "🌡️ Temperature" : a.type === "humidity" ? "💧 Humidity" : a.type === "co2" ? "🫧 CO₂" : `📳 ${a.type}`}
+              {String(a.type || "anomaly").replace(/_/g, " ")}
             </span>
             <Badge text={a.severity} color={RISK_COLORS[a.severity]} />
           </div>
@@ -333,6 +333,12 @@ export default function NutriTrackDashboard() {
   const [activeTab, setActiveTab] = useState("overview");
   const [assistantQuery, setAssistantQuery] = useState("");
   const [assistantResponse, setAssistantResponse] = useState(null);
+  const [assistantSuggestions, setAssistantSuggestions] = useState([]);
+  const [assistantSuggestionsLoading, setAssistantSuggestionsLoading] = useState(false);
+  const [assistantSuggestionsError, setAssistantSuggestionsError] = useState("");
+  const [liveRecommendation, setLiveRecommendation] = useState(null);
+  const [liveRecommendationLoading, setLiveRecommendationLoading] = useState(false);
+  const [liveRecommendationError, setLiveRecommendationError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [dashboardData, setDashboardData] = useState(null);
   const [dataStatus, setDataStatus] = useState("loading");
@@ -410,7 +416,7 @@ export default function NutriTrackDashboard() {
       city: selected.location.city,
       country: selected.location.country || "Morocco",
       hours_elapsed: 4,
-      user_query: selected.recommendation?.summary ? `Explain the live state of ${selected.product.name}.` : "",
+      user_query: "",
       analysis_label: "live_dashboard_input",
     });
     setLiveReasoningResult(null);
@@ -453,6 +459,180 @@ export default function NutriTrackDashboard() {
     hours_elapsed: Number(liveReasoningForm.hours_elapsed),
   });
 
+  const buildAssistantPayloadFromSelected = (scenario, queryOverride) => ({
+    analysis_label: "dashboard_selected_scenario",
+    user_query: queryOverride ?? "",
+    product: {
+      product_id: scenario?.product?.id || "",
+      product_type: scenario?.product?.type || "dairy",
+      name: scenario?.product?.name || "Unknown Product",
+      batch_id: scenario?.product?.batch_id || scenario?.product?.id || "",
+      origin: scenario?.product?.origin || "",
+      destination: scenario?.product?.destination || "",
+      optimal_temp_min: Number(scenario?.product?.optimal_temp_min ?? 0),
+      optimal_temp_max: Number(scenario?.product?.optimal_temp_max ?? 8),
+      optimal_humidity_min: Number(scenario?.product?.optimal_humidity_min ?? 40),
+      optimal_humidity_max: Number(scenario?.product?.optimal_humidity_max ?? 80),
+      max_co2_ppm: Number(scenario?.product?.max_co2_ppm ?? 1000),
+      shelf_life_hours: Number(scenario?.product?.shelf_life_hours ?? 72),
+      value_usd: Number(scenario?.product?.value_usd ?? 0),
+      weight_kg: Number(scenario?.product?.weight_kg ?? 0),
+    },
+    telemetry: {
+      temperature_celsius: Number(scenario?.telemetry?.temperature ?? 0),
+      humidity_percent: Number(scenario?.telemetry?.humidity ?? 0),
+      co2_ppm: Number(scenario?.telemetry?.co2 ?? 0),
+      vibration_g: Number(scenario?.telemetry?.vibration ?? 0),
+    },
+    gps: {
+      latitude: Number(scenario?.location?.lat ?? 0),
+      longitude: Number(scenario?.location?.lon ?? 0),
+      city: scenario?.location?.city || "",
+      country: scenario?.location?.country || "Morocco",
+    },
+    hours_elapsed: 4,
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadAssistantSuggestions() {
+      if (!selected) {
+        setAssistantSuggestions([]);
+        setAssistantSuggestionsError("");
+        return;
+      }
+
+      setAssistantSuggestionsLoading(true);
+      setAssistantSuggestionsError("");
+      try {
+        const response = await fetch(`/api/assistant`, {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            ...buildAssistantPayloadFromSelected(
+              selected,
+              `Generate exactly 4 short user questions for a logistics operator about this shipment. ` +
+              `Return the questions in next_actions only. No explanations.`
+            ),
+            assistant_query:
+              "Generate operational user questions based on current shipment context.",
+            include_dashboard_context: true,
+            max_fleet_items: 3,
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error(`Unable to load assistant suggestions (${response.status})`);
+        }
+
+        const payload = await response.json();
+        const candidateSuggestions = Array.isArray(payload.next_actions)
+          ? payload.next_actions
+              .map((item) => String(item || "").trim())
+              .filter(Boolean)
+              .slice(0, 4)
+          : [];
+
+        if (!cancelled) {
+          if (candidateSuggestions.length > 0) {
+            setAssistantSuggestions(candidateSuggestions);
+          } else {
+            setAssistantSuggestions([]);
+            setAssistantSuggestionsError("LLM returned no suggestions for this shipment.");
+          }
+        }
+      } catch (_error) {
+        if (!cancelled) {
+          setAssistantSuggestions([]);
+          setAssistantSuggestionsError("Unable to fetch LLM suggestions right now.");
+        }
+      } finally {
+        if (!cancelled) {
+          setAssistantSuggestionsLoading(false);
+        }
+      }
+    }
+
+    loadAssistantSuggestions();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selected]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadLiveRecommendation() {
+      if (!selected) {
+        setLiveRecommendation(null);
+        setLiveRecommendationError("");
+        return;
+      }
+
+      setLiveRecommendationLoading(true);
+      setLiveRecommendationError("");
+      try {
+        const response = await fetch(`/api/assistant`, {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            ...buildAssistantPayloadFromSelected(
+              selected,
+              "Generate an operational recommendation for this shipment including: summary, key risks, and immediate actions."
+            ),
+            assistant_query:
+              "Provide the best operational recommendation now for this shipment and list immediate actions.",
+            include_dashboard_context: true,
+            max_fleet_items: 5,
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error(`Unable to load live recommendation (${response.status})`);
+        }
+
+        const payload = await response.json();
+        const keyPoints = Array.isArray(payload.key_points)
+          ? payload.key_points.map((item) => String(item || "").trim()).filter(Boolean)
+          : [];
+        const nextActions = Array.isArray(payload.next_actions)
+          ? payload.next_actions.map((item) => String(item || "").trim()).filter(Boolean)
+          : [];
+
+        if (!cancelled) {
+          setLiveRecommendation({
+            summary: String(payload.answer || "").trim(),
+            explanation: keyPoints,
+            actions: nextActions,
+          });
+        }
+      } catch (_error) {
+        if (!cancelled) {
+          setLiveRecommendation(null);
+          setLiveRecommendationError("Unable to generate live LLM recommendation for this shipment.");
+        }
+      } finally {
+        if (!cancelled) {
+          setLiveRecommendationLoading(false);
+        }
+      }
+    }
+
+    loadLiveRecommendation();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selected]);
+
   const handleAssistantQuery = async () => {
     if (!assistantQuery.trim() || !selected) return;
     setIsLoading(true);
@@ -465,7 +645,7 @@ export default function NutriTrackDashboard() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          ...buildReasoningPayload(assistantQuery),
+          ...buildAssistantPayloadFromSelected(selected, assistantQuery),
           assistant_query: assistantQuery,
           include_dashboard_context: true,
           max_fleet_items: 5,
@@ -692,6 +872,22 @@ export default function NutriTrackDashboard() {
                   <Badge text={selected.risk_level} color={RISK_COLORS[selected.risk_level]} />
                 </div>
                 <AnomalyList anomalies={selected.anomalies} />
+                {(selected.anomaly_analysis?.root_cause || selected.anomaly_analysis?.predicted_impact) && (
+                  <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
+                    {selected.anomaly_analysis?.root_cause && (
+                      <div style={{ background: "var(--surface)", borderRadius: 10, padding: 10 }}>
+                        <div style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginBottom: 4 }}>ROOT CAUSE (LLM)</div>
+                        <div style={{ fontSize: 12, color: "var(--text)", lineHeight: 1.5 }}>{selected.anomaly_analysis.root_cause}</div>
+                      </div>
+                    )}
+                    {selected.anomaly_analysis?.predicted_impact && (
+                      <div style={{ background: "var(--surface)", borderRadius: 10, padding: 10 }}>
+                        <div style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginBottom: 4 }}>PREDICTED IMPACT (LLM)</div>
+                        <div style={{ fontSize: 12, color: "var(--text)", lineHeight: 1.5 }}>{selected.anomaly_analysis.predicted_impact}</div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Decision + Guardrail */}
@@ -729,20 +925,36 @@ export default function NutriTrackDashboard() {
               {/* Recommendation */}
               <div style={{ gridColumn: "1 / -1", background: "var(--card-bg)", borderRadius: 16, padding: 20, borderLeft: `4px solid ${RISK_COLORS[selected.risk_level]}` }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginBottom: 8 }}>SMART RECOMMENDATION</div>
-                <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>{selected.recommendation.summary}</div>
-                <div style={{ fontSize: 13, color: "var(--text-dim)", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{selected.recommendation.explanation}</div>
-                {selected.recommendation.alternatives.length > 0 && (
+                {liveRecommendationLoading && (
+                  <div style={{ fontSize: 12, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+                    Generating recommendation from LLM...
+                  </div>
+                )}
+                {!liveRecommendationLoading && liveRecommendationError && (
+                  <div style={{ fontSize: 12, color: "#f59e0b", fontFamily: "var(--font-mono)" }}>
+                    {liveRecommendationError}
+                  </div>
+                )}
+                {!liveRecommendationLoading && !liveRecommendationError && liveRecommendation && (
+                  <>
+                    <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>{liveRecommendation.summary || "No recommendation text returned by LLM."}</div>
+                    {liveRecommendation.explanation.length > 0 && (
+                      <div style={{ fontSize: 13, color: "var(--text-dim)", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
+                        {"- " + liveRecommendation.explanation.join("\n- ")}
+                      </div>
+                    )}
+                  </>
+                )}
+                {!liveRecommendationLoading && !liveRecommendationError && liveRecommendation?.actions?.length > 0 && (
                   <div style={{ marginTop: 14 }}>
-                    <div style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text-dim)", marginBottom: 8, textTransform: "uppercase" }}>Alternatives</div>
+                    <div style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text-dim)", marginBottom: 8, textTransform: "uppercase" }}>Immediate Actions</div>
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                      {selected.recommendation.alternatives.map((alt, i) => (
+                      {liveRecommendation.actions.map((actionText, i) => (
                         <div key={i} style={{
                           padding: "10px 14px", borderRadius: 10, background: "var(--surface)",
                           border: "1px solid var(--border)", flex: "1 1 200px",
                         }}>
-                          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--accent-2)" }}>{alt.action?.replace(/_/g, " ") || alt.description?.slice(0, 30)}</div>
-                          <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 3 }}>{alt.description}</div>
-                          <div style={{ fontSize: 10, color: "#f59e0b", marginTop: 3, fontStyle: "italic" }}>{alt.trade_off}</div>
+                          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--accent-2)" }}>{actionText}</div>
                         </div>
                       ))}
                     </div>
@@ -858,17 +1070,17 @@ export default function NutriTrackDashboard() {
               <div style={{ background: "var(--card-bg)", borderRadius: 16, padding: 24 }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginBottom: 16 }}>🤖 SMART ASSISTANT</div>
                 <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 16 }}>
-                  Ask about the current shipment. Example: "What should I do with this product?" or "Is it safe to deliver?"
+                  Ask about the current shipment. The assistant and recommendation panel are generated live by the LLM.
                 </div>
 
-                {/* Quick actions */}
+                {/* LLM-generated quick actions */}
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
-                  {[
-                    "What should I do with this product?",
-                    "Is it safe to deliver?",
-                    "Show me alternatives",
-                    "Explain the risk",
-                  ].map(q => (
+                  {assistantSuggestionsLoading && (
+                    <span style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+                      Generating LLM suggestions...
+                    </span>
+                  )}
+                  {!assistantSuggestionsLoading && assistantSuggestions.map((q) => (
                     <button key={q} onClick={() => { setAssistantQuery(q); }} style={{
                       padding: "6px 12px", borderRadius: 8, border: "1px solid var(--border)",
                       background: "var(--surface)", color: "var(--text-dim)", cursor: "pointer",
@@ -876,6 +1088,11 @@ export default function NutriTrackDashboard() {
                     }}>{q}</button>
                   ))}
                 </div>
+                {!assistantSuggestionsLoading && assistantSuggestionsError && (
+                  <div style={{ marginBottom: 12, fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+                    {assistantSuggestionsError}
+                  </div>
+                )}
 
                 {/* Input */}
                 <div style={{ display: "flex", gap: 8 }}>

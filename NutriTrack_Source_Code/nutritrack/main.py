@@ -163,6 +163,10 @@ def _build_dashboard_data(results: list) -> dict:
                 }
                 for a in (state.anomaly_output.anomalies if state.anomaly_output else [])
             ],
+            "anomaly_analysis": {
+                "root_cause": state.anomaly_output.root_cause_analysis if state.anomaly_output else "",
+                "predicted_impact": state.anomaly_output.predicted_impact if state.anomaly_output else "",
+            },
             "risk_level": state.anomaly_output.risk_level.value if state.anomaly_output else "low",
             "decision": {
                 "action": state.final_decision.action.value if state.final_decision else "no_action",

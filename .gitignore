@@ -1,0 +1,34 @@
+# Python
+.venv/
+venv/
+env/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Environment files
+.env
+.env.*
+
+# Generated NutriTrack exports
+NutriTrack_Source_Code/nutritrack/data/dashboard_data.json
+
+# Node / Vite
+NutriTrack_Dashboard_App/node_modules/
+NutriTrack_Dashboard_App/dist/
+NutriTrack_Dashboard_App/.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# IDE / OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

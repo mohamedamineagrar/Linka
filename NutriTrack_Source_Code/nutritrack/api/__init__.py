@@ -1,0 +1,1 @@
+"""NutriTrack FastAPI application package."""

@@ -11794,7 +11794,7 @@
     "origin": "Casablanca, Morocco",
     "cargo_type": "tomato",
     "notes": "",
-    "status": "confirmed",
+    "status": "in_transit",
     "created_at": "2026-04-17T00:15:23.246909+00:00",
     "confirmed_at": "2026-04-17T00:15:35.322753+00:00",
     "confirmed_by": "amine@gmail.com",
@@ -23498,7 +23498,16 @@
         "lon": -6.8408929
       },
       "openstreetmap_directions_url": "https://www.openstreetmap.org/directions?engine=fossgis_osrm_car&route=33.5945144%2C-7.6200284%3B34.0218454%2C-6.8408929"
-    }
+    },
+    "lifecycle_stage": "delivery",
+    "lifecycle_updated_at": "2026-04-17T01:29:57.214120+00:00",
+    "lifecycle_history": [
+      {
+        "stage": "delivery",
+        "at": "2026-04-17T01:29:57.214120+00:00",
+        "by": "amine@gmail.com"
+      }
+    ]
   },
   {
     "id": "REQ-00003",
@@ -41949,9 +41958,9 @@
     "origin": "Casablanca, Morocco",
     "cargo_type": "potato",
     "notes": "",
-    "status": "confirmed",
-    "lifecycle_stage": "storage",
-    "lifecycle_updated_at": "2026-04-17T01:22:42.259898+00:00",
+    "status": "in_transit",
+    "lifecycle_stage": "delivery",
+    "lifecycle_updated_at": "2026-04-17T01:29:10.717908+00:00",
     "lifecycle_history": [
       {
         "stage": "storage",
@@ -41961,6 +41970,11 @@
       {
         "stage": "storage",
         "at": "2026-04-17T01:22:42.259898+00:00",
+        "by": "amine@gmail.com"
+      },
+      {
+        "stage": "delivery",
+        "at": "2026-04-17T01:29:10.717908+00:00",
         "by": "amine@gmail.com"
       }
     ],

@@ -379,6 +379,41 @@ function ScenarioCard({ scenario, isSelected, onClick }) {
   );
 }
 
+function ActiveShipmentLiveCard({ requestItem, onOpen }) {
+  const stage = normalizeLifecycleStage(requestItem);
+  const stageColor = stage === "delivery" ? "#06b6d4" : stage === "destination" ? "#10b981" : "#f59e0b";
+
+  return (
+    <div
+      onClick={onOpen}
+      style={{
+        background: "var(--surface)",
+        borderRadius: 12,
+        padding: "12px 14px",
+        cursor: "pointer",
+        border: `1px solid ${stageColor}55`,
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {requestItem.id} · live shipment
+          </div>
+          <div style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginTop: 3 }}>
+            {requestItem.origin} → {requestItem.destination}
+          </div>
+        </div>
+        <Badge text={stage} color={stageColor} />
+      </div>
+
+      <div style={{ marginTop: 8, display: "flex", justifyContent: "space-between", gap: 8, fontSize: 11 }}>
+        <span style={{ color: "var(--text-dim)" }}>Qty: {requestItem.quantity}</span>
+        <span style={{ color: stageColor, fontWeight: 600 }}>tracking active</span>
+      </div>
+    </div>
+  );
+}
+
 function AgentWorkflowDiagram({ log }) {
   const nodes = [
     { id: "supervisor", label: "Supervisor", x: 50, y: 15, icon: "🎛️" },
@@ -799,6 +834,10 @@ export default function NutriTrackDashboard() {
   const userRole = String(authUser?.role || "client").toLowerCase();
   const isAdmin = userRole === "admin";
   const isClient = !isAdmin;
+  const inDeliveryRequests = shipmentRequests.filter(
+    (requestItem) => normalizeLifecycleStage(requestItem) === "delivery"
+  );
+  const activeShipmentCount = scenarios.length + inDeliveryRequests.length;
 
   const loadShipmentRequests = async () => {
     if (!authUser) return;
@@ -1495,7 +1534,7 @@ export default function NutriTrackDashboard() {
           </div>
           <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#10b981", animation: "pulse 2s infinite" }} />
           <span style={{ fontSize: 12, color: "#10b981", fontFamily: "var(--font-mono)" }}>
-            {dataStatus === "ready" ? "API SYNCED" : dataStatus === "fallback" ? "LOCAL FALLBACK" : "SYNCING"} · {isAdmin ? `${scenarios.length} shipments tracked` : `${shipmentRequests.length} client requests`}
+            {dataStatus === "ready" ? "API SYNCED" : dataStatus === "fallback" ? "LOCAL FALLBACK" : "SYNCING"} · {isAdmin ? `${activeShipmentCount} shipments tracked` : `${shipmentRequests.length} client requests`}
           </span>
           <button
             onClick={handleLogout}
@@ -1548,11 +1587,20 @@ export default function NutriTrackDashboard() {
           }}>
             <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-dim)", marginBottom: 12, fontFamily: "var(--font-mono)", textTransform: "uppercase", letterSpacing: "0.06em" }}>Active Shipments</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {scenarios.length > 0 ? (
+              {scenarios.length > 0 &&
                 scenarios.map((s, i) => (
                   <ScenarioCard key={i} scenario={s} isSelected={i === selectedIdx} onClick={() => setSelectedIdx(i)} />
-                ))
-              ) : (
+                ))}
+
+              {inDeliveryRequests.map((requestItem) => (
+                <ActiveShipmentLiveCard
+                  key={`live-${requestItem.id}`}
+                  requestItem={requestItem}
+                  onOpen={() => setActiveTab("shipments")}
+                />
+              ))}
+
+              {scenarios.length === 0 && inDeliveryRequests.length === 0 && (
                 <div style={{ color: "var(--text-dim)", fontSize: 13, lineHeight: 1.7, padding: 12 }}>
                   No shipment data loaded yet. The dashboard depends on the backend API.
                 </div>

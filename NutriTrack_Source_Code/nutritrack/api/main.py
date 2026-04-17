@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import json
+import os
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
+from urllib import error, request
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Path as ApiPath
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from nutritrack.agents.transport_agent import (
+    build_openstreetmap_directions_url,
+    geocode_place,
+    optimize_transport,
+)
 from nutritrack.main import _build_dashboard_data
 from nutritrack.models.schemas import GPSLocation, HealthScore, NutriTrackState, ProductInfo, TelemetryData, QRTraceability
 from nutritrack.utils.llm_grok import get_grok_client
@@ -17,6 +27,194 @@ from nutritrack.utils.simulation import ScenarioType, _compute_health
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_DASHBOARD_PATH = PROJECT_ROOT / "nutritrack" / "data" / "dashboard_data.json"
+SHIPMENT_REQUESTS_PATH = PROJECT_ROOT / "nutritrack" / "data" / "shipment_requests.json"
+
+
+@dataclass
+class AuthUser:
+    id: str
+    email: str
+    role: str
+
+
+class AuthCredentials(BaseModel):
+    email: str = Field(..., min_length=3)
+    password: str = Field(..., min_length=6)
+    role: str = Field(default="client")
+
+
+class AuthResponse(BaseModel):
+    access_token: str
+    refresh_token: str | None = None
+    token_type: str = "bearer"
+    expires_in: int | None = None
+    user: dict[str, Any]
+
+
+def _is_truthy(value: str | None, default: bool = True) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _get_supabase_config() -> dict[str, str]:
+    url = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+    anon_key = os.getenv("SUPABASE_ANON_KEY", "").strip()
+    service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    if not url or not anon_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Supabase auth is not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY.",
+        )
+    return {
+        "url": url,
+        "anon_key": anon_key,
+        "service_key": service_key,
+    }
+
+
+def _auth_enforced() -> bool:
+    return _is_truthy(os.getenv("SUPABASE_ENFORCE_AUTH"), default=True)
+
+
+def _parse_auth_header(authorization: str | None) -> str:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    parts = authorization.strip().split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
+        raise HTTPException(status_code=401, detail="Invalid Authorization header format")
+    return parts[1].strip()
+
+
+def _supabase_request(
+    *,
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+    bearer_token: str | None = None,
+    prefer_service_key: bool = False,
+) -> dict[str, Any]:
+    cfg = _get_supabase_config()
+    key = cfg["service_key"] if prefer_service_key and cfg["service_key"] else cfg["anon_key"]
+    auth_value = bearer_token or key
+    headers = {
+        "apikey": key,
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {auth_value}",
+    }
+
+    body = None
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+
+    req = request.Request(
+        url=f"{cfg['url']}{path}",
+        data=body,
+        headers=headers,
+        method=method,
+    )
+
+    try:
+        with request.urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except error.HTTPError as exc:
+        detail = "Supabase auth request failed"
+        try:
+            raw = exc.read().decode("utf-8")
+            data = json.loads(raw) if raw else {}
+            if isinstance(data, dict):
+                detail = str(data.get("msg") or data.get("error_description") or data.get("error") or detail)
+        except Exception:
+            pass
+        raise HTTPException(status_code=exc.code, detail=detail) from exc
+    except error.URLError as exc:
+        raise HTTPException(status_code=503, detail="Unable to reach Supabase auth service") from exc
+
+
+def _extract_role(user: dict[str, Any]) -> str:
+    app_meta = user.get("app_metadata") if isinstance(user.get("app_metadata"), dict) else {}
+    user_meta = user.get("user_metadata") if isinstance(user.get("user_metadata"), dict) else {}
+    return str(app_meta.get("role") or user_meta.get("role") or "client")
+
+
+def _verify_access_token(token: str) -> AuthUser:
+    user = _supabase_request(
+        method="GET",
+        path="/auth/v1/user",
+        bearer_token=token,
+    )
+    user_id = str(user.get("id", "")).strip()
+    email = str(user.get("email", "")).strip()
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return AuthUser(id=user_id, email=email, role=_extract_role(user))
+
+
+def require_auth(authorization: str | None = Header(default=None)) -> AuthUser:
+    if not _auth_enforced():
+        return AuthUser(id="dev-user", email="dev@local", role="admin")
+    token = _parse_auth_header(authorization)
+    return _verify_access_token(token)
+
+
+def _require_admin(current_user: AuthUser) -> None:
+    if current_user.role.strip().lower() != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+
+
+def _utc_iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _load_shipment_requests() -> list[dict[str, Any]]:
+    if not SHIPMENT_REQUESTS_PATH.exists():
+        return []
+    try:
+        payload = json.loads(SHIPMENT_REQUESTS_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    return payload if isinstance(payload, list) else []
+
+
+def _save_shipment_requests(items: list[dict[str, Any]]) -> None:
+    SHIPMENT_REQUESTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SHIPMENT_REQUESTS_PATH.write_text(json.dumps(items, indent=2), encoding="utf-8")
+
+
+def _shipment_sort_key(item: dict[str, Any]) -> str:
+    return str(item.get("created_at", ""))
+
+
+def _build_transport_plan(
+    *,
+    origin_label: str,
+    destination_label: str,
+    current_position: ShipmentCoordinate | None = None,
+) -> dict[str, Any]:
+    origin_coords = geocode_place(origin_label)
+    if not origin_coords:
+        raise HTTPException(status_code=400, detail=f"Unable to geocode origin: {origin_label}")
+
+    destination_coords = geocode_place(destination_label)
+    if not destination_coords:
+        raise HTTPException(status_code=400, detail=f"Unable to geocode destination: {destination_label}")
+
+    transport = optimize_transport(
+        origin_coords,
+        destination_coords,
+        current_position=current_position.model_dump() if current_position else None,
+    )
+    transport["origin"] = {
+        "label": origin_label,
+        **origin_coords,
+    }
+    transport["destination"] = {
+        "label": destination_label,
+        **destination_coords,
+    }
+    transport["openstreetmap_directions_url"] = build_openstreetmap_directions_url(origin_coords, destination_coords)
+    return transport
 
 class AnalysisRequest(BaseModel):
     """Request body for a single on-demand simulation."""
@@ -37,6 +235,24 @@ class AssistantRequest(AnalysisRequest):
     assistant_query: str = Field(..., min_length=1)
     include_dashboard_context: bool = Field(default=True)
     max_fleet_items: int = Field(default=3, ge=1, le=10)
+
+
+class ShipmentRequestCreate(BaseModel):
+    quantity: float = Field(..., gt=0)
+    destination: str = Field(..., min_length=2)
+    origin: str = Field(default="Casablanca, Morocco", min_length=2)
+    cargo_type: str = Field(default="general")
+    notes: str = Field(default="")
+
+
+class ShipmentCoordinate(BaseModel):
+    lat: float = Field(..., ge=-90, le=90)
+    lon: float = Field(..., ge=-180, le=180)
+
+
+class ShipmentConfirmRequest(BaseModel):
+    origin: str | None = None
+    current_position: ShipmentCoordinate | None = None
 
 
 app = FastAPI(
@@ -210,8 +426,144 @@ def health_check() -> dict:
     return {"status": "ok", "service": "NutriTrack API"}
 
 
+@app.post("/api/auth/signup", response_model=AuthResponse)
+def auth_signup(payload: AuthCredentials) -> dict:
+    normalized_email = payload.email.strip().lower()
+    normalized_role = payload.role.strip().lower() if payload.role else "client"
+    if normalized_role not in {"client", "admin"}:
+        normalized_role = "client"
+    response = _supabase_request(
+        method="POST",
+        path="/auth/v1/signup",
+        payload={
+            "email": normalized_email,
+            "password": payload.password,
+            "data": {
+                "role": normalized_role,
+            },
+        },
+    )
+    return {
+        "access_token": response.get("access_token", ""),
+        "refresh_token": response.get("refresh_token"),
+        "token_type": response.get("token_type", "bearer"),
+        "expires_in": response.get("expires_in"),
+        "user": response.get("user") or {},
+    }
+
+
+@app.post("/api/auth/login", response_model=AuthResponse)
+def auth_login(payload: AuthCredentials) -> dict:
+    normalized_email = payload.email.strip().lower()
+    response = _supabase_request(
+        method="POST",
+        path="/auth/v1/token?grant_type=password",
+        payload={
+            "email": normalized_email,
+            "password": payload.password,
+        },
+    )
+    return {
+        "access_token": response.get("access_token", ""),
+        "refresh_token": response.get("refresh_token"),
+        "token_type": response.get("token_type", "bearer"),
+        "expires_in": response.get("expires_in"),
+        "user": response.get("user") or {},
+    }
+
+
+@app.get("/api/auth/me")
+def auth_me(current_user: AuthUser = Depends(require_auth)) -> dict:
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "role": current_user.role,
+    }
+
+
+@app.post("/api/shipment-requests")
+def create_shipment_request(payload: ShipmentRequestCreate, current_user: AuthUser = Depends(require_auth)) -> dict:
+    items = _load_shipment_requests()
+    created = {
+        "id": f"REQ-{len(items) + 1:05d}",
+        "client_id": current_user.id,
+        "client_email": current_user.email,
+        "quantity": round(float(payload.quantity), 3),
+        "destination": payload.destination.strip(),
+        "origin": payload.origin.strip(),
+        "cargo_type": payload.cargo_type.strip() or "general",
+        "notes": payload.notes.strip(),
+        "status": "pending_confirmation",
+        "created_at": _utc_iso_now(),
+        "confirmed_at": None,
+        "confirmed_by": None,
+        "transport_plan": None,
+    }
+    items.append(created)
+    _save_shipment_requests(items)
+    return created
+
+
+@app.get("/api/shipment-requests")
+def list_shipment_requests(current_user: AuthUser = Depends(require_auth)) -> dict:
+    items = _load_shipment_requests()
+    role = current_user.role.strip().lower()
+    if role == "admin":
+        visible = sorted(items, key=_shipment_sort_key, reverse=True)
+    else:
+        visible = [item for item in items if str(item.get("client_id", "")) == current_user.id]
+        visible.sort(key=_shipment_sort_key, reverse=True)
+
+    return {
+        "items": visible,
+        "total": len(visible),
+        "role": current_user.role,
+    }
+
+
+@app.post("/api/shipment-requests/{request_id}/confirm")
+def confirm_shipment_request(
+    payload: ShipmentConfirmRequest,
+    request_id: str = ApiPath(..., min_length=3),
+    current_user: AuthUser = Depends(require_auth),
+) -> dict:
+    _require_admin(current_user)
+
+    items = _load_shipment_requests()
+    target_index = -1
+    for index, item in enumerate(items):
+        if str(item.get("id", "")) == request_id:
+            target_index = index
+            break
+
+    if target_index < 0:
+        raise HTTPException(status_code=404, detail="Shipment request not found")
+
+    target = items[target_index]
+    if str(target.get("status", "")).lower() == "confirmed":
+        return target
+
+    origin_label = payload.origin.strip() if payload.origin and payload.origin.strip() else str(target.get("origin", ""))
+    destination_label = str(target.get("destination", ""))
+    transport_plan = _build_transport_plan(
+        origin_label=origin_label,
+        destination_label=destination_label,
+        current_position=payload.current_position,
+    )
+
+    target["origin"] = origin_label
+    target["status"] = "confirmed"
+    target["confirmed_at"] = _utc_iso_now()
+    target["confirmed_by"] = current_user.email
+    target["transport_plan"] = transport_plan
+
+    items[target_index] = target
+    _save_shipment_requests(items)
+    return target
+
+
 @app.get("/api/dashboard")
-def get_dashboard(refresh: bool = False) -> dict:
+def get_dashboard(refresh: bool = False, _: AuthUser = Depends(require_auth)) -> dict:
     return _generate_dashboard(refresh=refresh)
 
 
@@ -230,7 +582,7 @@ def get_scenarios() -> dict:
 
 
 @app.post("/api/analyze")
-def analyze_shipment(payload: AnalysisRequest) -> dict:
+def analyze_shipment(payload: AnalysisRequest, _: AuthUser = Depends(require_auth)) -> dict:
     try:
         scenario_data = _run_agent_reasoning(payload)
     except Exception as exc:
@@ -245,7 +597,7 @@ def analyze_shipment(payload: AnalysisRequest) -> dict:
 
 
 @app.post("/api/reason")
-def reason_from_real_input(payload: AnalysisRequest) -> dict:
+def reason_from_real_input(payload: AnalysisRequest, _: AuthUser = Depends(require_auth)) -> dict:
     """Explicit endpoint for real-world reasoning from live input data."""
     if payload.product is None and payload.telemetry is None and payload.gps is None:
         raise HTTPException(
@@ -267,7 +619,7 @@ def reason_from_real_input(payload: AnalysisRequest) -> dict:
 
 
 @app.post("/api/assistant")
-def smart_assistant(payload: AssistantRequest) -> dict:
+def smart_assistant(payload: AssistantRequest, _: AuthUser = Depends(require_auth)) -> dict:
     """Groq smart assistant grounded in selected shipment and app-level data."""
     try:
         assistant = _assistant_answer(payload)

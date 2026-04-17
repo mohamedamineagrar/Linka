@@ -1,5 +1,7 @@
 // export { default } from "./NutriTrackAutonomousDashboard.jsx";
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect } from "react";
+import { CircleMarker, MapContainer, Polyline, Popup, TileLayer, useMap } from "react-leaflet";
+import "leaflet/dist/leaflet.css";
 
 const EMPTY_DASHBOARD_DATA = {
   summary: {
@@ -29,6 +31,125 @@ const AGENT_COLORS = {
 
 const RISK_COLORS = { low: "#10b981", medium: "#f59e0b", high: "#f97316", critical: "#ef4444" };
 const PRODUCT_ICONS = { dairy: "🥛", seafood: "🦐", pharmaceuticals: "💉", meat: "🥩", fruits: "🍊" };
+const AUTH_TOKEN_STORAGE_KEY = "nutritrack_access_token";
+
+const DEFAULT_MAP_CENTER = [33.5731, -7.5898];
+
+
+function MapAutoBounds({ points }) {
+  const map = useMap();
+
+  useEffect(() => {
+    if (!Array.isArray(points) || points.length === 0) {
+      return;
+    }
+
+    if (points.length === 1) {
+      map.setView(points[0], 11);
+      return;
+    }
+
+    map.fitBounds(points, {
+      padding: [24, 24],
+      maxZoom: 12,
+    });
+  }, [map, points]);
+
+  return null;
+}
+
+
+function DashboardLocationMap({ selected }) {
+  const lat = Number(selected?.location?.lat ?? NaN);
+  const lon = Number(selected?.location?.lon ?? NaN);
+  const hasPoint = Number.isFinite(lat) && Number.isFinite(lon);
+  const center = hasPoint ? [lat, lon] : DEFAULT_MAP_CENTER;
+
+  return (
+    <div style={{ height: 280, borderRadius: 12, overflow: "hidden", border: "1px solid var(--border)" }}>
+      <MapContainer
+        center={center}
+        zoom={hasPoint ? 9 : 6}
+        style={{ width: "100%", height: "100%" }}
+        scrollWheelZoom={true}
+      >
+        <TileLayer
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        />
+        {hasPoint && (
+          <CircleMarker center={[lat, lon]} radius={9} pathOptions={{ color: "#6366f1", fillColor: "#6366f1", fillOpacity: 0.7 }}>
+            <Popup>
+              {selected?.product?.name || "Shipment"}<br />
+              {selected?.location?.city || "Location"}
+            </Popup>
+          </CircleMarker>
+        )}
+      </MapContainer>
+    </div>
+  );
+}
+
+
+function ShipmentTrackingMap({ transportPlan }) {
+  const routePoints = Array.isArray(transportPlan?.primary?.points)
+    ? transportPlan.primary.points
+        .map((point) => [Number(point?.lat), Number(point?.lon)])
+        .filter((pair) => Number.isFinite(pair[0]) && Number.isFinite(pair[1]))
+    : [];
+
+  const origin = transportPlan?.origin;
+  const destination = transportPlan?.destination;
+
+  const originPoint = Number.isFinite(Number(origin?.lat)) && Number.isFinite(Number(origin?.lon))
+    ? [Number(origin.lat), Number(origin.lon)]
+    : null;
+  const destinationPoint = Number.isFinite(Number(destination?.lat)) && Number.isFinite(Number(destination?.lon))
+    ? [Number(destination.lat), Number(destination.lon)]
+    : null;
+
+  const derivedRoute = routePoints.length >= 2
+    ? routePoints
+    : [originPoint, destinationPoint].filter(Boolean);
+
+  const center = derivedRoute[0] || originPoint || destinationPoint || DEFAULT_MAP_CENTER;
+  const lastPoint = derivedRoute.length > 0 ? derivedRoute[derivedRoute.length - 1] : null;
+
+  return (
+    <div style={{ height: 250, borderRadius: 12, overflow: "hidden", border: "1px solid var(--border)" }}>
+      <MapContainer center={center} zoom={7} style={{ width: "100%", height: "100%" }} scrollWheelZoom={true}>
+        <TileLayer
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        />
+
+        <MapAutoBounds points={derivedRoute.length ? derivedRoute : [center]} />
+
+        {derivedRoute.length >= 2 && (
+          <Polyline positions={derivedRoute} pathOptions={{ color: "#3b82f6", weight: 4 }} />
+        )}
+
+        {originPoint && (
+          <CircleMarker center={originPoint} radius={8} pathOptions={{ color: "#10b981", fillColor: "#10b981", fillOpacity: 0.8 }}>
+            <Popup>Origin: {origin?.label || "Unknown"}</Popup>
+          </CircleMarker>
+        )}
+
+        {destinationPoint && (
+          <CircleMarker center={destinationPoint} radius={8} pathOptions={{ color: "#ef4444", fillColor: "#ef4444", fillOpacity: 0.8 }}>
+            <Popup>Destination: {destination?.label || "Unknown"}</Popup>
+          </CircleMarker>
+        )}
+
+        {lastPoint && (
+          <CircleMarker center={lastPoint} radius={7} pathOptions={{ color: "#f59e0b", fillColor: "#f59e0b", fillOpacity: 0.85 }}>
+            <Popup>Current tracking position</Popup>
+          </CircleMarker>
+        )}
+      </MapContainer>
+    </div>
+  );
+}
 
 // ── Components ──
 
@@ -331,6 +452,19 @@ function QRTrace({ traceability, product }) {
 export default function NutriTrackDashboard() {
   const [selectedIdx, setSelectedIdx] = useState(1);
   const [activeTab, setActiveTab] = useState("overview");
+  const [authMode, setAuthMode] = useState("login");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authRole, setAuthRole] = useState("client");
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [authNotice, setAuthNotice] = useState("");
+  const [authToken, setAuthToken] = useState(() => {
+    if (typeof window === "undefined") return "";
+    return window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || "";
+  });
+  const [authUser, setAuthUser] = useState(null);
+  const [authBooting, setAuthBooting] = useState(true);
   const [assistantQuery, setAssistantQuery] = useState("");
   const [assistantResponse, setAssistantResponse] = useState(null);
   const [assistantSuggestions, setAssistantSuggestions] = useState([]);
@@ -347,20 +481,220 @@ export default function NutriTrackDashboard() {
   const [liveReasoningResult, setLiveReasoningResult] = useState(null);
   const [liveReasoningError, setLiveReasoningError] = useState("");
   const [liveReasoningLoading, setLiveReasoningLoading] = useState(false);
+  const [shipmentRequests, setShipmentRequests] = useState([]);
+  const [shipmentRequestsLoading, setShipmentRequestsLoading] = useState(false);
+  const [shipmentRequestsError, setShipmentRequestsError] = useState("");
+  const [submitShipmentLoading, setSubmitShipmentLoading] = useState(false);
+  const [confirmShipmentLoadingId, setConfirmShipmentLoadingId] = useState("");
+  const [shipmentForm, setShipmentForm] = useState({
+    quantity: "",
+    destination: "",
+    origin: "Casablanca, Morocco",
+    cargo_type: "general",
+    notes: "",
+  });
+
+  const persistAuthToken = (token) => {
+    if (typeof window === "undefined") return;
+    if (token) {
+      window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+    } else {
+      window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+    }
+  };
+
+  const parseErrorDetail = async (response) => {
+    try {
+      const payload = await response.json();
+      if (payload && typeof payload.detail === "string") return payload.detail;
+      if (payload && typeof payload.error === "string") return payload.error;
+    } catch (_error) {
+      // Ignore non-JSON errors and return fallback message.
+    }
+    return `Request failed (${response.status})`;
+  };
+
+  const apiFetch = async (path, options = {}, tokenOverride = undefined) => {
+    const tokenToUse = tokenOverride !== undefined ? tokenOverride : authToken;
+    const incomingHeaders = options.headers || {};
+    const headers = {
+      ...incomingHeaders,
+    };
+
+    if (tokenToUse) {
+      headers.Authorization = `Bearer ${tokenToUse}`;
+    }
+
+    return fetch(path, {
+      ...options,
+      headers,
+    });
+  };
+
+  const clearAuthSession = (message = "") => {
+    persistAuthToken("");
+    setAuthToken("");
+    setAuthUser(null);
+    setDashboardData(null);
+    setDataStatus("loading");
+    setDataError("");
+    if (message) {
+      setAuthError(message);
+    }
+  };
+
+  const handleLogout = () => {
+    clearAuthSession("");
+  };
+
+  const handleAuthSubmit = async () => {
+    if (!authEmail.trim() || !authPassword.trim()) {
+      setAuthError("Email and password are required.");
+      return;
+    }
+
+    setAuthLoading(true);
+    setAuthError("");
+    setAuthNotice("");
+
+    try {
+      const endpoint = authMode === "signup" ? "/api/auth/signup" : "/api/auth/login";
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: authEmail.trim(),
+          password: authPassword,
+          role: authRole,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(await parseErrorDetail(response));
+      }
+
+      const payload = await response.json();
+      const token = String(payload.access_token || "");
+      if (!token) {
+        if (authMode === "signup") {
+          setAuthMode("login");
+          setAuthPassword("");
+          setAuthNotice(
+            "Account created. Check your email for confirmation, then log in."
+          );
+          return;
+        }
+        throw new Error("Login succeeded but no access token was returned.");
+      }
+
+      persistAuthToken(token);
+      setAuthToken(token);
+
+      const meResponse = await apiFetch(
+        "/api/auth/me",
+        {
+          method: "GET",
+          headers: {
+            Accept: "application/json",
+          },
+        },
+        token
+      );
+      if (!meResponse.ok) {
+        throw new Error(await parseErrorDetail(meResponse));
+      }
+
+      const mePayload = await meResponse.json();
+      setAuthUser({
+        id: String(mePayload.id || ""),
+        email: String(mePayload.email || authEmail.trim()),
+        role: String(mePayload.role || "client"),
+      });
+      if (authMode === "login" && authRole && String(mePayload.role || "client") !== authRole) {
+        setAuthNotice(`Connected role is ${String(mePayload.role || "client")}, not ${authRole}.`);
+      }
+      setAuthPassword("");
+      if (authMode !== "login") {
+        setAuthNotice("");
+      }
+    } catch (error) {
+      clearAuthSession("");
+      setAuthError(error instanceof Error ? error.message : "Authentication failed");
+      setAuthNotice("");
+    } finally {
+      setAuthLoading(false);
+    }
+  };
 
   useEffect(() => {
-    let isMounted = true;
+    let active = true;
 
-    async function loadDashboardData() {
+    async function hydrateAuthState() {
+      if (!authToken) {
+        if (active) {
+          setAuthBooting(false);
+        }
+        return;
+      }
+
       try {
-        const response = await fetch(`/api/dashboard`, {
+        const response = await apiFetch("/api/auth/me", {
+          method: "GET",
           headers: {
             Accept: "application/json",
           },
         });
 
         if (!response.ok) {
-          throw new Error(`Unable to load dashboard data (${response.status})`);
+          throw new Error(await parseErrorDetail(response));
+        }
+
+        const me = await response.json();
+        if (!active) return;
+
+        setAuthUser({
+          id: String(me.id || ""),
+          email: String(me.email || ""),
+          role: String(me.role || "client"),
+        });
+      } catch (_error) {
+        if (!active) return;
+        clearAuthSession("Session expired. Please log in again.");
+      } finally {
+        if (active) {
+          setAuthBooting(false);
+        }
+      }
+    }
+
+    hydrateAuthState();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function loadDashboardData() {
+      if (!authUser || String(authUser.role || "client").toLowerCase() !== "admin") {
+        return;
+      }
+
+      setDataStatus("loading");
+      try {
+        const response = await apiFetch(`/api/dashboard`, {
+          headers: {
+            Accept: "application/json",
+          },
+        });
+
+        if (!response.ok) {
+          throw new Error(await parseErrorDetail(response));
         }
 
         const payload = await response.json();
@@ -382,12 +716,134 @@ export default function NutriTrackDashboard() {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [authUser]);
+
+  useEffect(() => {
+    if (!authUser) return;
+
+    loadShipmentRequests();
+    const timer = window.setInterval(() => {
+      loadShipmentRequests();
+    }, 30000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [authUser]);
 
   const data = dashboardData;
   const scenarios = Array.isArray(data?.scenarios) ? data.scenarios : [];
   const selected = scenarios[Math.min(selectedIdx, scenarios.length - 1)] || null;
   const summary = data?.summary || EMPTY_DASHBOARD_DATA.summary;
+  const userRole = String(authUser?.role || "client").toLowerCase();
+  const isAdmin = userRole === "admin";
+  const isClient = !isAdmin;
+
+  const loadShipmentRequests = async () => {
+    if (!authUser) return;
+
+    setShipmentRequestsLoading(true);
+    setShipmentRequestsError("");
+    try {
+      const response = await apiFetch("/api/shipment-requests", {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(await parseErrorDetail(response));
+      }
+
+      const payload = await response.json();
+      setShipmentRequests(Array.isArray(payload.items) ? payload.items : []);
+    } catch (error) {
+      setShipmentRequests([]);
+      setShipmentRequestsError(error instanceof Error ? error.message : "Unable to load shipment requests");
+    } finally {
+      setShipmentRequestsLoading(false);
+    }
+  };
+
+  const handleShipmentFormField = (field, value) => {
+    setShipmentForm((previous) => ({
+      ...previous,
+      [field]: value,
+    }));
+  };
+
+  const handleCreateShipmentRequest = async () => {
+    if (!shipmentForm.quantity || Number(shipmentForm.quantity) <= 0) {
+      setShipmentRequestsError("Please enter a valid quantity.");
+      return;
+    }
+    if (!shipmentForm.destination.trim()) {
+      setShipmentRequestsError("Destination is required.");
+      return;
+    }
+
+    setSubmitShipmentLoading(true);
+    setShipmentRequestsError("");
+    try {
+      const response = await apiFetch("/api/shipment-requests", {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          quantity: Number(shipmentForm.quantity),
+          destination: shipmentForm.destination,
+          origin: shipmentForm.origin || "Casablanca, Morocco",
+          cargo_type: shipmentForm.cargo_type || "general",
+          notes: shipmentForm.notes || "",
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(await parseErrorDetail(response));
+      }
+
+      setShipmentForm({
+        quantity: "",
+        destination: "",
+        origin: shipmentForm.origin || "Casablanca, Morocco",
+        cargo_type: shipmentForm.cargo_type || "general",
+        notes: "",
+      });
+      await loadShipmentRequests();
+    } catch (error) {
+      setShipmentRequestsError(error instanceof Error ? error.message : "Unable to create shipment request");
+    } finally {
+      setSubmitShipmentLoading(false);
+    }
+  };
+
+  const handleConfirmShipmentRequest = async (requestId) => {
+    setConfirmShipmentLoadingId(requestId);
+    setShipmentRequestsError("");
+    try {
+      const response = await apiFetch(`/api/shipment-requests/${requestId}/confirm`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      });
+
+      if (!response.ok) {
+        throw new Error(await parseErrorDetail(response));
+      }
+
+      await loadShipmentRequests();
+    } catch (error) {
+      setShipmentRequestsError(error instanceof Error ? error.message : "Unable to confirm shipment request");
+    } finally {
+      setConfirmShipmentLoadingId("");
+    }
+  };
 
   useEffect(() => {
     if (!selected) return;
@@ -506,7 +962,7 @@ export default function NutriTrackDashboard() {
       setAssistantSuggestionsLoading(true);
       setAssistantSuggestionsError("");
       try {
-        const response = await fetch(`/api/assistant`, {
+        const response = await apiFetch(`/api/assistant`, {
           method: "POST",
           headers: {
             Accept: "application/json",
@@ -526,7 +982,7 @@ export default function NutriTrackDashboard() {
         });
 
         if (!response.ok) {
-          throw new Error(`Unable to load assistant suggestions (${response.status})`);
+          throw new Error(await parseErrorDetail(response));
         }
 
         const payload = await response.json();
@@ -577,7 +1033,7 @@ export default function NutriTrackDashboard() {
       setLiveRecommendationLoading(true);
       setLiveRecommendationError("");
       try {
-        const response = await fetch(`/api/assistant`, {
+        const response = await apiFetch(`/api/assistant`, {
           method: "POST",
           headers: {
             Accept: "application/json",
@@ -596,7 +1052,7 @@ export default function NutriTrackDashboard() {
         });
 
         if (!response.ok) {
-          throw new Error(`Unable to load live recommendation (${response.status})`);
+          throw new Error(await parseErrorDetail(response));
         }
 
         const payload = await response.json();
@@ -638,7 +1094,7 @@ export default function NutriTrackDashboard() {
     setIsLoading(true);
 
     try {
-      const response = await fetch(`/api/assistant`, {
+      const response = await apiFetch(`/api/assistant`, {
         method: "POST",
         headers: {
           Accept: "application/json",
@@ -653,7 +1109,7 @@ export default function NutriTrackDashboard() {
       });
 
       if (!response.ok) {
-        throw new Error(`Assistant request failed (${response.status})`);
+        throw new Error(await parseErrorDetail(response));
       }
 
       const payload = await response.json();
@@ -680,7 +1136,7 @@ export default function NutriTrackDashboard() {
     setLiveReasoningError("");
 
     try {
-      const response = await fetch(`/api/reason`, {
+      const response = await apiFetch(`/api/reason`, {
         method: "POST",
         headers: {
           Accept: "application/json",
@@ -690,7 +1146,7 @@ export default function NutriTrackDashboard() {
       });
 
       if (!response.ok) {
-        throw new Error(`Reasoning request failed (${response.status})`);
+        throw new Error(await parseErrorDetail(response));
       }
 
       const payload = await response.json();
@@ -710,12 +1166,25 @@ export default function NutriTrackDashboard() {
   };
 
   const tabs = [
-    { id: "overview", label: "Overview", icon: "📊" },
-    { id: "workflow", label: "Workflow", icon: "🔄" },
-    { id: "economics", label: "Economics", icon: "💰" },
-    { id: "assistant", label: "Assistant", icon: "🤖" },
-    { id: "reasoning", label: "Live Reasoning", icon: "🧠" },
+    ...(isAdmin
+      ? [
+          { id: "overview", label: "Overview", icon: "📊" },
+          { id: "workflow", label: "Workflow", icon: "🔄" },
+          { id: "economics", label: "Economics", icon: "💰" },
+          { id: "assistant", label: "Assistant", icon: "🤖" },
+          { id: "reasoning", label: "Live Reasoning", icon: "🧠" },
+          { id: "shipments", label: "Shipments", icon: "🚚" },
+        ]
+      : [{ id: "shipments", label: "Client Portal", icon: "📦" }]),
   ];
+
+  const showDashboardSidebar = isAdmin && activeTab !== "shipments" && scenarios.length > 0;
+
+  useEffect(() => {
+    if (!tabs.some((tab) => tab.id === activeTab)) {
+      setActiveTab(tabs[0]?.id || "shipments");
+    }
+  }, [tabs, activeTab]);
 
   return (
     <div style={{
@@ -738,6 +1207,178 @@ export default function NutriTrackDashboard() {
       margin: 0,
     }}>
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+
+      {authBooting ? (
+        <div style={{
+          minHeight: "100vh",
+          display: "grid",
+          placeItems: "center",
+          padding: 24,
+        }}>
+          <div style={{
+            width: "100%",
+            maxWidth: 420,
+            background: "var(--card-bg)",
+            borderRadius: 16,
+            border: "1px solid var(--border)",
+            padding: 24,
+            textAlign: "center",
+          }}>
+            <div style={{ fontSize: 14, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>Checking authentication...</div>
+          </div>
+        </div>
+      ) : !authUser ? (
+        <div style={{
+          minHeight: "100vh",
+          display: "grid",
+          placeItems: "center",
+          padding: 24,
+          background: "radial-gradient(circle at 20% 20%, #1a1a35 0%, #0a0a12 55%)",
+        }}>
+          <div style={{
+            width: "100%",
+            maxWidth: 440,
+            background: "var(--card-bg)",
+            borderRadius: 18,
+            border: "1px solid var(--border)",
+            padding: 24,
+            boxShadow: "0 20px 40px rgba(0,0,0,0.35)",
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <div>
+                <div style={{ fontSize: 22, fontWeight: 800 }}>Secure Access</div>
+                <div style={{ fontSize: 12, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginTop: 4 }}>Supabase JWT authentication</div>
+              </div>
+              <div style={{ fontSize: 20 }}>🔐</div>
+            </div>
+
+            <div style={{ display: "flex", gap: 6, marginBottom: 14, background: "var(--surface)", padding: 4, borderRadius: 10 }}>
+              <button
+                onClick={() => setAuthMode("login")}
+                style={{
+                  flex: 1,
+                  padding: "8px 10px",
+                  borderRadius: 8,
+                  border: "none",
+                  background: authMode === "login" ? "var(--accent)" : "transparent",
+                  color: authMode === "login" ? "#fff" : "var(--text-dim)",
+                  cursor: "pointer",
+                  fontWeight: 700,
+                }}
+              >
+                Login
+              </button>
+              <button
+                onClick={() => setAuthMode("signup")}
+                style={{
+                  flex: 1,
+                  padding: "8px 10px",
+                  borderRadius: 8,
+                  border: "none",
+                  background: authMode === "signup" ? "var(--accent)" : "transparent",
+                  color: authMode === "signup" ? "#fff" : "var(--text-dim)",
+                  cursor: "pointer",
+                  fontWeight: 700,
+                }}
+              >
+                Signup
+              </button>
+            </div>
+
+            <div style={{ display: "grid", gap: 10 }}>
+              <label style={{ display: "grid", gap: 6 }}>
+                <span style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>Email</span>
+                <input
+                  type="email"
+                  value={authEmail}
+                  onChange={(event) => setAuthEmail(event.target.value)}
+                  placeholder="you@example.com"
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: "1px solid var(--border)",
+                    background: "var(--surface)",
+                    color: "var(--text)",
+                    outline: "none",
+                  }}
+                />
+              </label>
+              <label style={{ display: "grid", gap: 6 }}>
+                <span style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>Password</span>
+                <input
+                  type="password"
+                  value={authPassword}
+                  onChange={(event) => setAuthPassword(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      handleAuthSubmit();
+                    }
+                  }}
+                  placeholder="Your secure password"
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: "1px solid var(--border)",
+                    background: "var(--surface)",
+                    color: "var(--text)",
+                    outline: "none",
+                  }}
+                />
+              </label>
+              <label style={{ display: "grid", gap: 6 }}>
+                <span style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>Role</span>
+                <select
+                  value={authRole}
+                  onChange={(event) => setAuthRole(event.target.value)}
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: "1px solid var(--border)",
+                    background: "var(--surface)",
+                    color: "var(--text)",
+                    outline: "none",
+                  }}
+                >
+                  <option value="client">Client</option>
+                  <option value="admin">Admin</option>
+                </select>
+              </label>
+            </div>
+
+            {authError && (
+              <div style={{ marginTop: 12, borderRadius: 10, padding: "10px 12px", background: "#ef444415", color: "#ef4444", fontSize: 12, fontFamily: "var(--font-mono)" }}>
+                {authError}
+              </div>
+            )}
+
+            {authNotice && (
+              <div style={{ marginTop: 12, borderRadius: 10, padding: "10px 12px", background: "#10b98115", color: "#10b981", fontSize: 12, fontFamily: "var(--font-mono)" }}>
+                {authNotice}
+              </div>
+            )}
+
+            <button
+              onClick={handleAuthSubmit}
+              disabled={authLoading}
+              style={{
+                width: "100%",
+                marginTop: 14,
+                padding: "11px 14px",
+                borderRadius: 10,
+                border: "none",
+                background: "linear-gradient(135deg, #6366f1, #06b6d4)",
+                color: "#fff",
+                fontWeight: 700,
+                cursor: "pointer",
+                opacity: authLoading ? 0.65 : 1,
+              }}
+            >
+              {authLoading ? "Authenticating..." : authMode === "login" ? "Login" : "Create account"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <>
 
       {/* Header */}
       <div style={{
@@ -763,10 +1404,29 @@ export default function NutriTrackDashboard() {
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+            {authUser.email} · {authUser.role}
+          </div>
           <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#10b981", animation: "pulse 2s infinite" }} />
           <span style={{ fontSize: 12, color: "#10b981", fontFamily: "var(--font-mono)" }}>
-            {dataStatus === "ready" ? "API SYNCED" : dataStatus === "fallback" ? "LOCAL FALLBACK" : "SYNCING"} · {scenarios.length} shipments tracked
+            {dataStatus === "ready" ? "API SYNCED" : dataStatus === "fallback" ? "LOCAL FALLBACK" : "SYNCING"} · {isAdmin ? `${scenarios.length} shipments tracked` : `${shipmentRequests.length} client requests`}
           </span>
+          <button
+            onClick={handleLogout}
+            style={{
+              marginLeft: 8,
+              padding: "7px 12px",
+              borderRadius: 9,
+              border: "1px solid var(--border)",
+              background: "var(--surface)",
+              color: "var(--text-dim)",
+              cursor: "pointer",
+              fontSize: 11,
+              fontFamily: "var(--font-mono)",
+            }}
+          >
+            Logout
+          </button>
         </div>
       </div>
 
@@ -791,27 +1451,29 @@ export default function NutriTrackDashboard() {
       </div>
 
       {/* Main Layout */}
-      <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: 0, minHeight: "calc(100vh - 250px)" }}>
+      <div style={{ display: "grid", gridTemplateColumns: showDashboardSidebar ? "320px 1fr" : "1fr", gap: 0, minHeight: "calc(100vh - 250px)" }}>
         {/* Sidebar — Shipment List */}
-        <div style={{
-          borderRight: "1px solid var(--border)",
-          padding: "12px 16px",
-          overflowY: "auto",
-          maxHeight: "calc(100vh - 250px)",
-        }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-dim)", marginBottom: 12, fontFamily: "var(--font-mono)", textTransform: "uppercase", letterSpacing: "0.06em" }}>Active Shipments</div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {scenarios.length > 0 ? (
-              scenarios.map((s, i) => (
-                <ScenarioCard key={i} scenario={s} isSelected={i === selectedIdx} onClick={() => setSelectedIdx(i)} />
-              ))
-            ) : (
-              <div style={{ color: "var(--text-dim)", fontSize: 13, lineHeight: 1.7, padding: 12 }}>
-                No shipment data loaded yet. The dashboard depends on the backend API.
-              </div>
-            )}
+        {showDashboardSidebar && (
+          <div style={{
+            borderRight: "1px solid var(--border)",
+            padding: "12px 16px",
+            overflowY: "auto",
+            maxHeight: "calc(100vh - 250px)",
+          }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-dim)", marginBottom: 12, fontFamily: "var(--font-mono)", textTransform: "uppercase", letterSpacing: "0.06em" }}>Active Shipments</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {scenarios.length > 0 ? (
+                scenarios.map((s, i) => (
+                  <ScenarioCard key={i} scenario={s} isSelected={i === selectedIdx} onClick={() => setSelectedIdx(i)} />
+                ))
+              ) : (
+                <div style={{ color: "var(--text-dim)", fontSize: 13, lineHeight: 1.7, padding: 12 }}>
+                  No shipment data loaded yet. The dashboard depends on the backend API.
+                </div>
+              )}
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Main Content */}
         <div style={{ padding: "16px 24px", overflowY: "auto", maxHeight: "calc(100vh - 250px)" }}>
@@ -834,7 +1496,7 @@ export default function NutriTrackDashboard() {
           </div>
 
           {/* Tab Content */}
-          {!hasDashboardData ? (
+          {activeTab !== "shipments" && !hasDashboardData ? (
             <div style={{ background: "var(--card-bg)", borderRadius: 16, padding: 24 }}>
               <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginBottom: 10 }}>WAITING FOR BACKEND DATA</div>
               <div style={{ color: "var(--text-dim)", lineHeight: 1.7, fontSize: 13 }}>
@@ -863,6 +1525,17 @@ export default function NutriTrackDashboard() {
               <div style={{ background: "var(--card-bg)", borderRadius: 16, padding: 20 }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginBottom: 12 }}>IoT TELEMETRY</div>
                 <TelemetryPanel telemetry={selected.telemetry} product={selected.product} />
+              </div>
+
+              {/* Live Map */}
+              <div style={{ gridColumn: "1 / -1", background: "var(--card-bg)", borderRadius: 16, padding: 20 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>LIVE SHIPMENT MAP</span>
+                  <span style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+                    OpenStreetMap tracking
+                  </span>
+                </div>
+                <DashboardLocationMap selected={selected} />
               </div>
 
               {/* Anomalies */}
@@ -1132,6 +1805,186 @@ export default function NutriTrackDashboard() {
             </div>
           )}
 
+          {activeTab === "shipments" && (
+            <div style={{ display: "grid", gridTemplateColumns: isAdmin ? "1fr" : "1fr 1fr", gap: 16 }}>
+              {isClient && (
+                <div style={{ background: "var(--card-bg)", borderRadius: 16, padding: 20 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginBottom: 12 }}>
+                    CLIENT SHIPMENT REQUEST
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                    <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+                      <span>Quantity</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.1"
+                        value={shipmentForm.quantity}
+                        onChange={(event) => handleShipmentFormField("quantity", event.target.value)}
+                        style={{ padding: "10px 12px", borderRadius: 10, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)", fontSize: 13, outline: "none" }}
+                      />
+                    </label>
+                    <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+                      <span>Cargo Type</span>
+                      <input
+                        value={shipmentForm.cargo_type}
+                        onChange={(event) => handleShipmentFormField("cargo_type", event.target.value)}
+                        style={{ padding: "10px 12px", borderRadius: 10, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)", fontSize: 13, outline: "none" }}
+                      />
+                    </label>
+                    <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)", gridColumn: "1 / -1" }}>
+                      <span>Destination</span>
+                      <input
+                        value={shipmentForm.destination}
+                        onChange={(event) => handleShipmentFormField("destination", event.target.value)}
+                        placeholder="Example: Rabat, Morocco"
+                        style={{ padding: "10px 12px", borderRadius: 10, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)", fontSize: 13, outline: "none" }}
+                      />
+                    </label>
+                    <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)", gridColumn: "1 / -1" }}>
+                      <span>Origin</span>
+                      <input
+                        value={shipmentForm.origin}
+                        onChange={(event) => handleShipmentFormField("origin", event.target.value)}
+                        style={{ padding: "10px 12px", borderRadius: 10, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)", fontSize: 13, outline: "none" }}
+                      />
+                    </label>
+                    <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)", gridColumn: "1 / -1" }}>
+                      <span>Notes</span>
+                      <textarea
+                        rows={3}
+                        value={shipmentForm.notes}
+                        onChange={(event) => handleShipmentFormField("notes", event.target.value)}
+                        style={{ padding: "10px 12px", borderRadius: 10, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)", fontSize: 13, outline: "none", resize: "vertical" }}
+                      />
+                    </label>
+                  </div>
+                  <div style={{ marginTop: 14, display: "flex", gap: 8 }}>
+                    <button
+                      onClick={handleCreateShipmentRequest}
+                      disabled={submitShipmentLoading}
+                      style={{
+                        padding: "10px 16px",
+                        borderRadius: 10,
+                        border: "none",
+                        background: "var(--accent)",
+                        color: "#fff",
+                        cursor: "pointer",
+                        fontWeight: 700,
+                        opacity: submitShipmentLoading ? 0.6 : 1,
+                      }}
+                    >
+                      {submitShipmentLoading ? "Sending..." : "Send shipment request"}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div style={{ background: "var(--card-bg)", borderRadius: 16, padding: 20 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+                    {isAdmin ? "DASHBOARD REQUESTS" : "MY REQUESTS"}
+                  </div>
+                  <button
+                    onClick={loadShipmentRequests}
+                    style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text-dim)", cursor: "pointer", fontSize: 11 }}
+                  >
+                    Refresh
+                  </button>
+                </div>
+
+                {shipmentRequestsLoading && (
+                  <div style={{ fontSize: 12, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>Loading shipment requests...</div>
+                )}
+
+                {!shipmentRequestsLoading && shipmentRequests.length === 0 && (
+                  <div style={{ fontSize: 13, color: "var(--text-dim)", lineHeight: 1.6 }}>
+                    No shipment requests yet.
+                  </div>
+                )}
+
+                {!shipmentRequestsLoading && shipmentRequests.length > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    {shipmentRequests.map((requestItem) => {
+                      const isPending = requestItem.status === "pending_confirmation";
+                      const isConfirmed = requestItem.status === "confirmed";
+                      const transportPlan = requestItem.transport_plan || null;
+                      return (
+                        <div key={requestItem.id} style={{ background: "var(--surface)", borderRadius: 12, border: "1px solid var(--border)", padding: 12 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                            <div>
+                              <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>{requestItem.id} · {requestItem.cargo_type}</div>
+                              <div style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginTop: 3 }}>
+                                Qty {requestItem.quantity} · {requestItem.origin} → {requestItem.destination}
+                              </div>
+                            </div>
+                            <Badge text={requestItem.status.replace(/_/g, " ")} color={isConfirmed ? "#10b981" : "#f59e0b"} />
+                          </div>
+
+                          {requestItem.notes && (
+                            <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-dim)" }}>{requestItem.notes}</div>
+                          )}
+
+                          {isAdmin && isPending && (
+                            <div style={{ marginTop: 10 }}>
+                              <button
+                                onClick={() => handleConfirmShipmentRequest(requestItem.id)}
+                                disabled={confirmShipmentLoadingId === requestItem.id}
+                                style={{
+                                  padding: "8px 12px",
+                                  borderRadius: 9,
+                                  border: "none",
+                                  background: "#10b981",
+                                  color: "#fff",
+                                  cursor: "pointer",
+                                  fontWeight: 700,
+                                  opacity: confirmShipmentLoadingId === requestItem.id ? 0.6 : 1,
+                                }}
+                              >
+                                {confirmShipmentLoadingId === requestItem.id ? "Confirming..." : "Confirm and dispatch Transport Agent"}
+                              </button>
+                            </div>
+                          )}
+
+                          {isConfirmed && transportPlan && (
+                            <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)", display: "grid", gap: 8 }}>
+                              <div style={{ fontSize: 12, color: "var(--text)" }}>
+                                Route: {Number(transportPlan.primary?.distance_km || 0).toFixed(1)} km · ETA {Number(transportPlan.primary?.duration_min || 0).toFixed(0)} min
+                              </div>
+                              <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+                                Heat risk: {transportPlan.heat_risk?.level || "unknown"} (score {transportPlan.heat_risk?.score ?? "n/a"}) · Weather {transportPlan.weather?.temperature_c ?? "n/a"}°C / {transportPlan.weather?.humidity_pct ?? "n/a"}%
+                              </div>
+                              {Array.isArray(transportPlan.suggestions) && transportPlan.suggestions.length > 0 && (
+                                <div style={{ fontSize: 12, color: "var(--text-dim)", whiteSpace: "pre-wrap" }}>
+                                  {"- " + transportPlan.suggestions.join("\n- ")}
+                                </div>
+                              )}
+                              <ShipmentTrackingMap transportPlan={transportPlan} />
+                              {transportPlan.openstreetmap_directions_url && (
+                                <a
+                                  href={transportPlan.openstreetmap_directions_url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  style={{ fontSize: 12, color: "var(--accent-2)", textDecoration: "none", fontWeight: 600 }}
+                                >
+                                  Open route in OpenStreetMap
+                                </a>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {shipmentRequestsError && (
+                  <div style={{ marginTop: 12, fontSize: 12, color: "#ef4444", fontFamily: "var(--font-mono)" }}>{shipmentRequestsError}</div>
+                )}
+              </div>
+            </div>
+          )}
+
           {activeTab === "reasoning" && selected && (
             <div style={{ display: "grid", gridTemplateColumns: "1.1fr 0.9fr", gap: 16 }}>
               <div style={{ background: "var(--card-bg)", borderRadius: 16, padding: 20 }}>
@@ -1285,6 +2138,8 @@ export default function NutriTrackDashboard() {
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: #1e1e35; border-radius: 3px; }
       `}</style>
+        </>
+      )}
     </div>
   );
 }

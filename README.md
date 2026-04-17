@@ -29,6 +29,9 @@ Créez ensuite un fichier `.env` si nécessaire, par exemple:
 
 ```env
 GROQ_API_KEY=your_key_here
+SUPABASE_URL=https://your-project-ref.supabase.co
+SUPABASE_ANON_KEY=your_supabase_anon_key_here
+SUPABASE_ENFORCE_AUTH=true
 ```
 
 Lancement de l’API:
@@ -47,12 +50,36 @@ npm run dev
 
 Le dashboard Vite est configuré pour proxyfier `/api` vers `http://127.0.0.1:8000`.
 
+Au démarrage, le frontend affiche maintenant un écran Login/Signup.
+Il appelle `/api/auth/login` ou `/api/auth/signup`, stocke le JWT (`access_token`) en local, puis envoie automatiquement `Authorization: Bearer <token>` sur les appels API protégés.
+
 ## Points d’entrée utiles
 
 - `GET /api/health` : état du backend
+- `POST /api/auth/signup` : création d’un compte utilisateur (Supabase Auth)
+- `POST /api/auth/login` : récupération du JWT (`access_token`)
+- `GET /api/auth/me` : profil courant à partir du JWT envoyé en Bearer
 - `GET /api/dashboard` : données agrégées pour l’interface
+- `POST /api/shipment-requests` : (client/admin) création d’une demande d’expédition (quantité, origine, destination)
+- `GET /api/shipment-requests` : liste des demandes (admin: toutes, client: ses propres demandes)
+- `POST /api/shipment-requests/{id}/confirm` : (admin) confirme la demande et déclenche le Transport Agent IA
 - `POST /api/reason` : exécution d’un raisonnement sur des données fournies
 - `POST /api/assistant` : réponse assistée par Groq si la clé est configurée
+
+Les routes métier (`/api/dashboard`, `/api/analyze`, `/api/reason`, `/api/assistant`) sont protégées par JWT si `SUPABASE_ENFORCE_AUTH=true`.
+
+Le workflow de demandes d’expédition est aussi protégé par JWT. Le rôle `client` peut créer/consulter ses demandes, et le rôle `admin` peut confirmer une demande pour lancer le Transport Agent:
+
+- Optimisation d’itinéraire via OSRM (OpenStreetMap)
+- Analyse météo via Open-Meteo
+- Calcul du risque chaleur sur trajet
+- Suggestions de reroutage en temps réel
+
+Exemple d’appel authentifié:
+
+```bash
+curl -H "Authorization: Bearer <access_token>" http://127.0.0.1:8000/api/dashboard
+```
 
 ## Génération des données
 

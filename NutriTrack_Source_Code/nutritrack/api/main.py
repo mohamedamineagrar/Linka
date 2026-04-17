@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib import error, request
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path as ApiPath
@@ -186,6 +186,34 @@ def _shipment_sort_key(item: dict[str, Any]) -> str:
     return str(item.get("created_at", ""))
 
 
+def _normalize_lifecycle_stage(item: dict[str, Any]) -> str:
+    stage = str(item.get("lifecycle_stage", "")).strip().lower()
+    if stage in {"storage", "delivery", "destination"}:
+        return stage
+
+    status = str(item.get("status", "")).strip().lower()
+    if status == "in_transit":
+        return "delivery"
+    if status in {"delivered", "completed"}:
+        return "destination"
+    return "storage"
+
+
+def _append_lifecycle_event(item: dict[str, Any], *, stage: str, actor: str) -> None:
+    history = item.get("lifecycle_history")
+    if not isinstance(history, list):
+        history = []
+
+    history.append(
+        {
+            "stage": stage,
+            "at": _utc_iso_now(),
+            "by": actor,
+        }
+    )
+    item["lifecycle_history"] = history
+
+
 def _build_transport_plan(
     *,
     origin_label: str,
@@ -253,6 +281,10 @@ class ShipmentCoordinate(BaseModel):
 class ShipmentConfirmRequest(BaseModel):
     origin: str | None = None
     current_position: ShipmentCoordinate | None = None
+
+
+class ShipmentStageUpdateRequest(BaseModel):
+    stage: Literal["storage", "delivery", "destination"]
 
 
 app = FastAPI(
@@ -494,6 +526,15 @@ def create_shipment_request(payload: ShipmentRequestCreate, current_user: AuthUs
         "cargo_type": payload.cargo_type.strip() or "general",
         "notes": payload.notes.strip(),
         "status": "pending_confirmation",
+        "lifecycle_stage": "storage",
+        "lifecycle_updated_at": _utc_iso_now(),
+        "lifecycle_history": [
+            {
+                "stage": "storage",
+                "at": _utc_iso_now(),
+                "by": current_user.email,
+            }
+        ],
         "created_at": _utc_iso_now(),
         "confirmed_at": None,
         "confirmed_by": None,
@@ -513,6 +554,14 @@ def list_shipment_requests(current_user: AuthUser = Depends(require_auth)) -> di
     else:
         visible = [item for item in items if str(item.get("client_id", "")) == current_user.id]
         visible.sort(key=_shipment_sort_key, reverse=True)
+
+    for item in visible:
+        stage = _normalize_lifecycle_stage(item)
+        item["lifecycle_stage"] = stage
+        if not item.get("lifecycle_updated_at"):
+            item["lifecycle_updated_at"] = item.get("confirmed_at") or item.get("created_at")
+        if not isinstance(item.get("lifecycle_history"), list):
+            item["lifecycle_history"] = []
 
     return {
         "items": visible,
@@ -553,9 +602,66 @@ def confirm_shipment_request(
 
     target["origin"] = origin_label
     target["status"] = "confirmed"
+    target["lifecycle_stage"] = "storage"
+    target["lifecycle_updated_at"] = _utc_iso_now()
     target["confirmed_at"] = _utc_iso_now()
     target["confirmed_by"] = current_user.email
     target["transport_plan"] = transport_plan
+    _append_lifecycle_event(target, stage="storage", actor=current_user.email)
+
+    items[target_index] = target
+    _save_shipment_requests(items)
+    return target
+
+
+@app.post("/api/shipment-requests/{request_id}/stage")
+def update_shipment_stage(
+    payload: ShipmentStageUpdateRequest,
+    request_id: str = ApiPath(..., min_length=3),
+    current_user: AuthUser = Depends(require_auth),
+) -> dict:
+    _require_admin(current_user)
+
+    items = _load_shipment_requests()
+    target_index = -1
+    for index, item in enumerate(items):
+        if str(item.get("id", "")) == request_id:
+            target_index = index
+            break
+
+    if target_index < 0:
+        raise HTTPException(status_code=404, detail="Shipment request not found")
+
+    target = items[target_index]
+    current_stage = _normalize_lifecycle_stage(target)
+    requested_stage = payload.stage
+
+    ordered_stages = ["storage", "delivery", "destination"]
+    current_idx = ordered_stages.index(current_stage)
+    requested_idx = ordered_stages.index(requested_stage)
+    if requested_idx < current_idx:
+        raise HTTPException(status_code=400, detail="Cannot move shipment lifecycle backward")
+    if requested_idx > current_idx + 1:
+        raise HTTPException(status_code=400, detail="Lifecycle must advance one stage at a time")
+
+    if requested_stage == "delivery":
+        if target.get("status") == "pending_confirmation" or not target.get("transport_plan"):
+            raise HTTPException(status_code=400, detail="Confirm shipment before starting delivery")
+        target["status"] = "in_transit"
+    elif requested_stage == "destination":
+        if current_stage != "delivery":
+            raise HTTPException(status_code=400, detail="Shipment must be in delivery stage first")
+        target["status"] = "delivered"
+        target["delivered_at"] = _utc_iso_now()
+    else:
+        if target.get("status") == "pending_confirmation":
+            target["status"] = "pending_confirmation"
+        else:
+            target["status"] = "confirmed"
+
+    target["lifecycle_stage"] = requested_stage
+    target["lifecycle_updated_at"] = _utc_iso_now()
+    _append_lifecycle_event(target, stage=requested_stage, actor=current_user.email)
 
     items[target_index] = target
     _save_shipment_requests(items)

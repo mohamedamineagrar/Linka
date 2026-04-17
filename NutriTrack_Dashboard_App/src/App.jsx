@@ -34,6 +34,61 @@ const PRODUCT_ICONS = { dairy: "🥛", seafood: "🦐", pharmaceuticals: "💉",
 const AUTH_TOKEN_STORAGE_KEY = "nutritrack_access_token";
 
 const DEFAULT_MAP_CENTER = [33.5731, -7.5898];
+const LIFECYCLE_STEPS = ["storage", "delivery", "destination"];
+
+
+function normalizeLifecycleStage(requestItem) {
+  const stage = String(requestItem?.lifecycle_stage || "").toLowerCase();
+  if (LIFECYCLE_STEPS.includes(stage)) {
+    return stage;
+  }
+
+  const status = String(requestItem?.status || "").toLowerCase();
+  if (status === "in_transit") return "delivery";
+  if (status === "delivered" || status === "completed") return "destination";
+  return "storage";
+}
+
+
+function LifecycleProgress({ stage }) {
+  const labels = {
+    storage: "Stockage",
+    delivery: "Livraison",
+    destination: "Destination",
+  };
+  const activeIdx = Math.max(0, LIFECYCLE_STEPS.indexOf(stage));
+
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        {LIFECYCLE_STEPS.map((step, idx) => {
+          const reached = idx <= activeIdx;
+          const current = idx === activeIdx;
+          return (
+            <div key={step} style={{ display: "flex", alignItems: "center", flex: 1, gap: 6 }}>
+              <div
+                style={{
+                  width: 12,
+                  height: 12,
+                  borderRadius: "50%",
+                  background: reached ? (current ? "#06b6d4" : "#10b981") : "#334155",
+                  border: reached ? "none" : "1px solid #64748b",
+                  flexShrink: 0,
+                }}
+              />
+              <div style={{ fontSize: 11, color: reached ? "var(--text)" : "var(--text-dim)", fontWeight: current ? 700 : 500 }}>
+                {labels[step]}
+              </div>
+              {idx < LIFECYCLE_STEPS.length - 1 && (
+                <div style={{ height: 2, flex: 1, background: idx < activeIdx ? "#10b981" : "#334155" }} />
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 
 function MapAutoBounds({ points }) {
@@ -91,7 +146,7 @@ function DashboardLocationMap({ selected }) {
 }
 
 
-function ShipmentTrackingMap({ transportPlan }) {
+function ShipmentTrackingMap({ transportPlan, lifecycleStage = "storage" }) {
   const routePoints = Array.isArray(transportPlan?.primary?.points)
     ? transportPlan.primary.points
         .map((point) => [Number(point?.lat), Number(point?.lon)])
@@ -113,7 +168,12 @@ function ShipmentTrackingMap({ transportPlan }) {
     : [originPoint, destinationPoint].filter(Boolean);
 
   const center = derivedRoute[0] || originPoint || destinationPoint || DEFAULT_MAP_CENTER;
-  const lastPoint = derivedRoute.length > 0 ? derivedRoute[derivedRoute.length - 1] : null;
+  const lastPoint =
+    lifecycleStage === "destination"
+      ? destinationPoint
+      : lifecycleStage === "delivery"
+        ? (derivedRoute.length > 0 ? derivedRoute[derivedRoute.length - 1] : null)
+        : originPoint;
 
   return (
     <div style={{ height: 250, borderRadius: 12, overflow: "hidden", border: "1px solid var(--border)" }}>
@@ -143,7 +203,7 @@ function ShipmentTrackingMap({ transportPlan }) {
 
         {lastPoint && (
           <CircleMarker center={lastPoint} radius={7} pathOptions={{ color: "#f59e0b", fillColor: "#f59e0b", fillOpacity: 0.85 }}>
-            <Popup>Current tracking position</Popup>
+            <Popup>Current stage position: {lifecycleStage}</Popup>
           </CircleMarker>
         )}
       </MapContainer>
@@ -486,6 +546,7 @@ export default function NutriTrackDashboard() {
   const [shipmentRequestsError, setShipmentRequestsError] = useState("");
   const [submitShipmentLoading, setSubmitShipmentLoading] = useState(false);
   const [confirmShipmentLoadingId, setConfirmShipmentLoadingId] = useState("");
+  const [stageUpdateLoadingId, setStageUpdateLoadingId] = useState("");
   const [shipmentForm, setShipmentForm] = useState({
     quantity: "",
     destination: "",
@@ -842,6 +903,31 @@ export default function NutriTrackDashboard() {
       setShipmentRequestsError(error instanceof Error ? error.message : "Unable to confirm shipment request");
     } finally {
       setConfirmShipmentLoadingId("");
+    }
+  };
+
+  const handleUpdateLifecycleStage = async (requestId, stage) => {
+    setStageUpdateLoadingId(`${requestId}:${stage}`);
+    setShipmentRequestsError("");
+    try {
+      const response = await apiFetch(`/api/shipment-requests/${requestId}/stage`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ stage }),
+      });
+
+      if (!response.ok) {
+        throw new Error(await parseErrorDetail(response));
+      }
+
+      await loadShipmentRequests();
+    } catch (error) {
+      setShipmentRequestsError(error instanceof Error ? error.message : "Unable to update shipment lifecycle stage");
+    } finally {
+      setStageUpdateLoadingId("");
     }
   };
 
@@ -1909,6 +1995,9 @@ export default function NutriTrackDashboard() {
                       const isPending = requestItem.status === "pending_confirmation";
                       const isConfirmed = requestItem.status === "confirmed";
                       const transportPlan = requestItem.transport_plan || null;
+                      const lifecycleStage = normalizeLifecycleStage(requestItem);
+                      const canStartDelivery = isAdmin && lifecycleStage === "storage" && !isPending && Boolean(transportPlan);
+                      const canFinishDelivery = isAdmin && lifecycleStage === "delivery";
                       return (
                         <div key={requestItem.id} style={{ background: "var(--surface)", borderRadius: 12, border: "1px solid var(--border)", padding: 12 }}>
                           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
@@ -1924,6 +2013,10 @@ export default function NutriTrackDashboard() {
                           {requestItem.notes && (
                             <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-dim)" }}>{requestItem.notes}</div>
                           )}
+
+                          <div style={{ marginTop: 10 }}>
+                            <LifecycleProgress stage={lifecycleStage} />
+                          </div>
 
                           {isAdmin && isPending && (
                             <div style={{ marginTop: 10 }}>
@@ -1946,10 +2039,54 @@ export default function NutriTrackDashboard() {
                             </div>
                           )}
 
-                          {isConfirmed && transportPlan && (
+                          {(canStartDelivery || canFinishDelivery) && (
+                            <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                              {canStartDelivery && (
+                                <button
+                                  onClick={() => handleUpdateLifecycleStage(requestItem.id, "delivery")}
+                                  disabled={stageUpdateLoadingId === `${requestItem.id}:delivery`}
+                                  style={{
+                                    padding: "8px 12px",
+                                    borderRadius: 9,
+                                    border: "none",
+                                    background: "#0ea5e9",
+                                    color: "#fff",
+                                    cursor: "pointer",
+                                    fontWeight: 700,
+                                    opacity: stageUpdateLoadingId === `${requestItem.id}:delivery` ? 0.6 : 1,
+                                  }}
+                                >
+                                  {stageUpdateLoadingId === `${requestItem.id}:delivery` ? "Updating..." : "Start delivery"}
+                                </button>
+                              )}
+                              {canFinishDelivery && (
+                                <button
+                                  onClick={() => handleUpdateLifecycleStage(requestItem.id, "destination")}
+                                  disabled={stageUpdateLoadingId === `${requestItem.id}:destination`}
+                                  style={{
+                                    padding: "8px 12px",
+                                    borderRadius: 9,
+                                    border: "none",
+                                    background: "#10b981",
+                                    color: "#fff",
+                                    cursor: "pointer",
+                                    fontWeight: 700,
+                                    opacity: stageUpdateLoadingId === `${requestItem.id}:destination` ? 0.6 : 1,
+                                  }}
+                                >
+                                  {stageUpdateLoadingId === `${requestItem.id}:destination` ? "Updating..." : "Mark arrived destination"}
+                                </button>
+                              )}
+                            </div>
+                          )}
+
+                          {(isConfirmed || lifecycleStage === "delivery" || lifecycleStage === "destination") && transportPlan && (
                             <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)", display: "grid", gap: 8 }}>
                               <div style={{ fontSize: 12, color: "var(--text)" }}>
                                 Route: {Number(transportPlan.primary?.distance_km || 0).toFixed(1)} km · ETA {Number(transportPlan.primary?.duration_min || 0).toFixed(0)} min
+                              </div>
+                              <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+                                Lifecycle: {lifecycleStage}
                               </div>
                               <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
                                 Heat risk: {transportPlan.heat_risk?.level || "unknown"} (score {transportPlan.heat_risk?.score ?? "n/a"}) · Weather {transportPlan.weather?.temperature_c ?? "n/a"}°C / {transportPlan.weather?.humidity_pct ?? "n/a"}%
@@ -1959,7 +2096,7 @@ export default function NutriTrackDashboard() {
                                   {"- " + transportPlan.suggestions.join("\n- ")}
                                 </div>
                               )}
-                              <ShipmentTrackingMap transportPlan={transportPlan} />
+                              <ShipmentTrackingMap transportPlan={transportPlan} lifecycleStage={lifecycleStage} />
                               {transportPlan.openstreetmap_directions_url && (
                                 <a
                                   href={transportPlan.openstreetmap_directions_url}

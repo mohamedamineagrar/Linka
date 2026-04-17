@@ -63,6 +63,7 @@ Il appelle `/api/auth/login` ou `/api/auth/signup`, stocke le JWT (`access_token
 - `POST /api/shipment-requests` : (client/admin) création d’une demande d’expédition (quantité, origine, destination)
 - `GET /api/shipment-requests` : liste des demandes (admin: toutes, client: ses propres demandes)
 - `POST /api/shipment-requests/{id}/confirm` : (admin) confirme la demande et déclenche le Transport Agent IA
+- `POST /api/shipment-requests/{id}/stage` : (admin) fait avancer le cycle de vie (`storage` -> `delivery` -> `destination`)
 - `POST /api/reason` : exécution d’un raisonnement sur des données fournies
 - `POST /api/assistant` : réponse assistée par Groq si la clé est configurée
 

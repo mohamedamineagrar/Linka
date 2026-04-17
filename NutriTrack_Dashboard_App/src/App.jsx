@@ -582,6 +582,7 @@ export default function NutriTrackDashboard() {
   const [submitShipmentLoading, setSubmitShipmentLoading] = useState(false);
   const [confirmShipmentLoadingId, setConfirmShipmentLoadingId] = useState("");
   const [stageUpdateLoadingId, setStageUpdateLoadingId] = useState("");
+  const [deleteShipmentLoadingId, setDeleteShipmentLoadingId] = useState("");
   const [shipmentForm, setShipmentForm] = useState({
     quantity: "",
     destination: "",
@@ -967,6 +968,29 @@ export default function NutriTrackDashboard() {
       setShipmentRequestsError(error instanceof Error ? error.message : "Unable to update shipment lifecycle stage");
     } finally {
       setStageUpdateLoadingId("");
+    }
+  };
+
+  const handleDeleteShipmentRequest = async (requestId) => {
+    setDeleteShipmentLoadingId(requestId);
+    setShipmentRequestsError("");
+    try {
+      const response = await apiFetch(`/api/shipment-requests/${requestId}`, {
+        method: "DELETE",
+        headers: {
+          Accept: "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(await parseErrorDetail(response));
+      }
+
+      await loadShipmentRequests();
+    } catch (error) {
+      setShipmentRequestsError(error instanceof Error ? error.message : "Unable to delete shipment request");
+    } finally {
+      setDeleteShipmentLoadingId("");
     }
   };
 
@@ -2125,6 +2149,28 @@ export default function NutriTrackDashboard() {
                                   {stageUpdateLoadingId === `${requestItem.id}:destination` ? "Updating..." : "Mark arrived destination"}
                                 </button>
                               )}
+                            </div>
+                          )}
+
+                          {isAdmin && (
+                            <div style={{ marginTop: 10, display: "flex", justifyContent: "flex-end" }}>
+                              <button
+                                onClick={() => handleDeleteShipmentRequest(requestItem.id)}
+                                disabled={deleteShipmentLoadingId === requestItem.id}
+                                style={{
+                                  padding: "7px 11px",
+                                  borderRadius: 8,
+                                  border: "1px solid #7f1d1d",
+                                  background: "#7f1d1d33",
+                                  color: "#fecaca",
+                                  cursor: "pointer",
+                                  fontWeight: 700,
+                                  fontSize: 11,
+                                  opacity: deleteShipmentLoadingId === requestItem.id ? 0.6 : 1,
+                                }}
+                              >
+                                {deleteShipmentLoadingId === requestItem.id ? "Deleting..." : "Delete shipment"}
+                              </button>
                             </div>
                           )}
 

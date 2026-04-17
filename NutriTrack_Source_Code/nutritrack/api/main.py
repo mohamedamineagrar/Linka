@@ -668,6 +668,32 @@ def update_shipment_stage(
     return target
 
 
+@app.delete("/api/shipment-requests/{request_id}")
+def delete_shipment_request(
+    request_id: str = ApiPath(..., min_length=3),
+    current_user: AuthUser = Depends(require_auth),
+) -> dict:
+    _require_admin(current_user)
+
+    items = _load_shipment_requests()
+    target_index = -1
+    for index, item in enumerate(items):
+        if str(item.get("id", "")) == request_id:
+            target_index = index
+            break
+
+    if target_index < 0:
+        raise HTTPException(status_code=404, detail="Shipment request not found")
+
+    removed = items.pop(target_index)
+    _save_shipment_requests(items)
+    return {
+        "deleted": True,
+        "id": request_id,
+        "status": str(removed.get("status", "")),
+    }
+
+
 @app.get("/api/dashboard")
 def get_dashboard(refresh: bool = False, _: AuthUser = Depends(require_auth)) -> dict:
     return _generate_dashboard(refresh=refresh)
